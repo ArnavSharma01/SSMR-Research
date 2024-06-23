@@ -1,60 +1,51 @@
-#include <Wire.h>
-#include <SparkFunMPU9250-DMP.h> // Include SparkFun MPU-9250-DMP library
-
-// Pin definitions
-#define IMU_RESET_PIN 14   // GPIO pin connected to DTR pin on SEN-10736
-#define IMU_RX_PIN 16      // GPIO pin connected to TX0 pin on SEN-10736
-#define IMU_TX_PIN 17      // GPIO pin connected to RXI pin on SEN-10736
-#define IMU_BAUDRATE 57600 // Baud rate of the SEN-10736
-
-// Create an instance of the MPU9250-DMP class
-MPU9250_DMP imu;
-
 void setup() {
-  Serial.begin(115200); // Start serial communication with ESP32
-  Wire.begin(); // Start I2C communication (needed for MPU9250 library)
-
-  // Initialize the SEN-10736 IMU
-  imu.begin(IMU_BAUDRATE, IMU_RX_PIN, IMU_TX_PIN, IMU_RESET_PIN);
-  
-  // Verify communication with the IMU
-  if (imu.begin() != INV_SUCCESS) {
-    Serial.println("Failed to communicate with MPU-9250!");
-    while (1); // Halt the program if communication fails
-  }
-  
-  // Initialize the IMU sensor fusion and set the output data rate
-  imu.dmpBegin(DMP_FEATURE_6X_LP_QUAT | DMP_FEATURE_GYRO_CAL, 10);
+  Serial.begin(115200); // Start the serial communication with the computer
+  Serial2.begin(57600, SERIAL_8N1, 16, 17); // Start serial communication with Razor IMU (TX pin, RX pin)
 }
 
 void loop() {
-  // Read sensor data
-  imu.update();
-
-  // Get accelerometer, gyroscope, and magnetometer data
-  float ax, ay, az;
-  float gx, gy, gz;
-  float mx, my, mz;
-
-  imu.getAccel(&ax, &ay, &az);
-  imu.getGyro(&gx, &gy, &gz);
-  imu.getMag(&mx, &my, &mz);
-
-  // Print sensor data
-  Serial.print("Acc (m/s^2): ");
-  Serial.print(ax); Serial.print(", ");
-  Serial.print(ay); Serial.print(", ");
-  Serial.println(az);
-
-  Serial.print("Gyro (deg/s): ");
-  Serial.print(gx); Serial.print(", ");
-  Serial.print(gy); Serial.print(", ");
-  Serial.println(gz);
-
-  Serial.print("Mag (uT): ");
-  Serial.print(mx); Serial.print(", ");
-  Serial.print(my); Serial.print(", ");
-  Serial.println(mz);
-
-  delay(100); // Delay between readings
+  static unsigned long lastPrint = 0;
+  unsigned long now = millis();
+  
+  // Check if data is available to read from Razor IMU
+  while (Serial2.available()) {
+    char c = Serial2.read(); // Read the incoming data from Razor IMU
+    
+    // Check for the start of a data packet
+    if (c == '$') {
+      // Read the following characters until a newline or carriage return is encountered
+      String data = Serial2.readStringUntil('\n');
+      
+      // Example: $RPY,12.34,-56.78,90.12*45
+      // Parse the data if it starts with $RPY
+      if (data.startsWith("$RPY")) {
+        // Remove the $RPY prefix
+        data.remove(0, 4);
+        
+        // Split the remaining string by commas
+        int comma1 = data.indexOf(',');
+        int comma2 = data.indexOf(',', comma1 + 1);
+        
+        if (comma1 != -1 && comma2 != -1) {
+          // Extract accelerometer, gyro, and magnetometer values
+          float accelX = data.substring(0, comma1).toFloat();
+          float accelY = data.substring(comma1 + 1, comma2).toFloat();
+          float accelZ = data.substring(comma2 + 1).toFloat();
+          
+          // Print accelerometer data
+          Serial.print("Accel X: "); Serial.print(accelX, 6);
+          Serial.print(", Y: "); Serial.print(accelY, 6);
+          Serial.print(", Z: "); Serial.println(accelZ, 6);
+        }
+      }
+    }
+  }
+  
+  // Print data every second
+  if (now - lastPrint >= 1000) {
+    // Request data from Razor IMU
+    Serial2.println("REQ"); // Example command to request data
+    lastPrint = now;
+  }
 }
+
