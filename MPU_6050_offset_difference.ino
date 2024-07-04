@@ -55,7 +55,7 @@ void loop() {
     digitalWrite(LED_PIN, blinkState);
 
     // check if 5 minutes have passed
-    if (millis() - start_time >= 1 * 60 * 1000) {
+    if (millis() - start_time >= 5 * 60 * 1000) {
         // calculate the average readings
         gx_avg = gx_sum / readings_count;
         gy_avg = gy_sum / readings_count;
