@@ -1,107 +1,73 @@
 #include <Wire.h>
-#include <I2Cdev.h>
-#include <MPU6050_6Axis_MotionApps20.h>
-#include <Encoder.h>
-#include <Kalman.h>
+#include <MPU6050.h>
+#include <SimpleKalmanFilter.h>
 
-// MPU6050 instance
 MPU6050 mpu;
+SimpleKalmanFilter kalmanYaw(1, 1, 0.01); // Adjust the parameters based on your needs
 
-// Encoder instances
-Encoder leftEncoder(2, 3);  // Update with your encoder pins
-Encoder rightEncoder(4, 5); // Update with your encoder pins
+const int encoderPinA = 2; // Adjust based on your setup
+const int encoderPinB = 3; // Adjust based on your setup
 
-// Kalman filter instance for yaw
-Kalman kalmanYaw;
-
-// DMP variables
-bool dmpReady = false;
-uint8_t mpuIntStatus;
-uint8_t devStatus;
-uint16_t packetSize;
-uint16_t fifoCount;
-uint8_t fifoBuffer[64];
-Quaternion q;
-VectorFloat gravity;
-float ypr[3];
-
-// Encoder variables
-long leftEncoderTicks = 0;
-long rightEncoderTicks = 0;
-double encoderYaw = 0.0;
-
-// Robot parameters
-const double wheelBase = 0.15; // Distance between wheels in meters
-const double ticksPerRevolution = 360.0; // Encoder ticks per revolution
-const double wheelCircumference = 0.2; // Circumference of the wheel in meters
+volatile long encoderTicks = 0;
+float previousYaw = 0;
 
 void setup() {
   Serial.begin(115200);
   Wire.begin();
   mpu.initialize();
-  
-  // Verify connection
-  if (!mpu.testConnection()) {
-    Serial.println("MPU6050 connection failed");
-    while (1);
-  }
 
-  // Load and configure the DMP
-  devStatus = mpu.dmpInitialize();
-  if (devStatus == 0) {
-    mpu.setDMPEnabled(true);
-    mpuIntStatus = mpu.getIntStatus();
-    dmpReady = true;
-    packetSize = mpu.dmpGetFIFOPacketSize();
+  pinMode(encoderPinA, INPUT);
+  pinMode(encoderPinB, INPUT);
+  attachInterrupt(digitalPinToInterrupt(encoderPinA), encoderISR, CHANGE);
+
+  if (mpu.testConnection()) {
+    Serial.println("MPU6050 connection successful");
   } else {
-    Serial.print("DMP Initialization failed (code ");
-    Serial.print(devStatus);
-    Serial.println(")");
-    while (1);
+    Serial.println("MPU6050 connection failed");
   }
-
-  // Initialize Kalman filter
-  kalmanYaw.setAngle(0.0);
 }
 
 void loop() {
-  if (!dmpReady) return;
+  // Read the IMU
+  mpu.getRotation(&gx, &gy, &gz);
+  float imuYaw = calculateYawFromGyro(gz);
 
-  // Check for DMP data ready interrupt (this should happen frequently)
-  while (fifoCount < packetSize) {
-    fifoCount = mpu.getFIFOCount();
-  }
+  // Read the encoder
+  float encoderYaw = calculateYawFromEncoder();
 
-  // Read a packet from FIFO
-  mpu.getFIFOBytes(fifoBuffer, packetSize);
-  mpu.dmpGetQuaternion(&q, fifoBuffer);
-  mpu.dmpGetGravity(&gravity, &q);
-  mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+  // Fuse the data using the Kalman filter
+  float kalmanYawValue = kalmanYaw.updateEstimate(imuYaw, encoderYaw);
 
-  // Calculate yaw from IMU (in degrees)
-  double imuYaw = ypr[0] * 180/M_PI;
-
-  // Calculate encoder yaw
-  long newLeftEncoderTicks = leftEncoder.read();
-  long newRightEncoderTicks = rightEncoder.read();
-  double leftDistance = (newLeftEncoderTicks - leftEncoderTicks) / ticksPerRevolution * wheelCircumference;
-  double rightDistance = (newRightEncoderTicks - rightEncoderTicks) / ticksPerRevolution * wheelCircumference;
-  double deltaYaw = (rightDistance - leftDistance) / wheelBase * 180 / M_PI;
-
-  encoderYaw += deltaYaw;
-  leftEncoderTicks = newLeftEncoderTicks;
-  rightEncoderTicks = newRightEncoderTicks;
-
-  // Fuse IMU yaw and encoder yaw using Kalman filter
-  double kalmanYawValue = kalmanYaw.getAngle(imuYaw, deltaYaw, 0.01);
-
-  // Print the results
+  // Output the result
   Serial.print("IMU Yaw: ");
   Serial.print(imuYaw);
-  Serial.print("\tEncoder Yaw: ");
+  Serial.print(" Encoder Yaw: ");
   Serial.print(encoderYaw);
-  Serial.print("\tKalman Yaw: ");
+  Serial.print(" Kalman Yaw: ");
   Serial.println(kalmanYawValue);
 
-  delay(10);
+  delay(100);
 }
+
+void encoderISR() {
+  static uint8_t state = 0;
+  state = (state << 2) | ((digitalRead(encoderPinB) << 1) | digitalRead(encoderPinA));
+  encoderTicks += (ENC_STATES[state & 0x0F]);
+}
+
+float calculateYawFromGyro(int16_t gz) {
+  float gyroYawRate = gz / 131.0; // Assuming the gyro sensitivity is set to 131 LSB/°/s
+  float dt = 0.01; // Assuming a loop time of 10ms
+  float yaw = previousYaw + gyroYawRate * dt;
+  previousYaw = yaw;
+  return yaw;
+}
+
+float calculateYawFromEncoder() {
+  // Assuming 360 ticks per revolution, adjust based on your encoder specs
+  float yaw = (encoderTicks / 360.0) * 360.0;
+  return yaw;
+}
+
+// Array to define encoder state transitions
+const int8_t ENC_STATES[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
