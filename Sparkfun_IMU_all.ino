@@ -1,51 +1,92 @@
+#include <Wire.h>
+#include <MPU6050_6Axis_MotionApps20.h>
+#include <SimpleKalmanFilter.h>
+
+MPU6050 mpu;
+
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float euler[3];         // [psi, theta, phi]    Euler angle container
+
+SimpleKalmanFilter kalmanYaw(1, 1, 0.01); // Adjust the parameters based on your needs
+
+const int encoderPinA = 2; // Adjust based on your setup
+const int encoderPinB = 3; // Adjust based on your setup
+
+volatile long encoderTicks = 0;
+
 void setup() {
-  Serial.begin(115200); // Start the serial communication with the computer
-  Serial2.begin(57600, SERIAL_8N1, 16, 17); // Start serial communication with Razor IMU (TX pin, RX pin)
+    Serial.begin(115200);
+    Wire.begin();
+    mpu.initialize();
+
+    pinMode(encoderPinA, INPUT);
+    pinMode(encoderPinB, INPUT);
+    attachInterrupt(digitalPinToInterrupt(encoderPinA), encoderISR, CHANGE);
+
+    devStatus = mpu.dmpInitialize();
+
+    if (devStatus == 0) {
+        mpu.setDMPEnabled(true);
+        attachInterrupt(digitalPinToInterrupt(digitalPinToInterrupt(2)), dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
+        dmpReady = true;
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    } else {
+        Serial.print("DMP Initialization failed (code ");
+        Serial.print(devStatus);
+        Serial.println(")");
+    }
 }
 
 void loop() {
-  static unsigned long lastPrint = 0;
-  unsigned long now = millis();
-  
-  // Check if data is available to read from Razor IMU
-  while (Serial2.available()) {
-    char c = Serial2.read(); // Read the incoming data from Razor IMU
-    
-    // Check for the start of a data packet
-    if (c == '$') {
-      // Read the following characters until a newline or carriage return is encountered
-      String data = Serial2.readStringUntil('\n');
-      
-      // Example: $RPY,12.34,-56.78,90.12*45
-      // Parse the data if it starts with $RPY
-      if (data.startsWith("$RPY")) {
-        // Remove the $RPY prefix
-        data.remove(0, 4);
-        
-        // Split the remaining string by commas
-        int comma1 = data.indexOf(',');
-        int comma2 = data.indexOf(',', comma1 + 1);
-        
-        if (comma1 != -1 && comma2 != -1) {
-          // Extract accelerometer, gyro, and magnetometer values
-          float accelX = data.substring(0, comma1).toFloat();
-          float accelY = data.substring(comma1 + 1, comma2).toFloat();
-          float accelZ = data.substring(comma2 + 1).toFloat();
-          
-          // Print accelerometer data
-          Serial.print("Accel X: "); Serial.print(accelX, 6);
-          Serial.print(", Y: "); Serial.print(accelY, 6);
-          Serial.print(", Z: "); Serial.println(accelZ, 6);
-        }
-      }
-    }
-  }
-  
-  // Print data every second
-  if (now - lastPrint >= 1000) {
-    // Request data from Razor IMU
-    Serial2.println("REQ"); // Example command to request data
-    lastPrint = now;
-  }
+    if (!dmpReady) return;
+
+    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+    mpu.getFIFOBytes(fifoBuffer, packetSize);
+    mpu.resetFIFO();
+    fifoCount -= packetSize;
+
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetYawPitchRoll(euler, &q, &gravity);
+    float dmpYaw = euler[0] * 180/M_PI; // Convert to degrees
+
+    float encoderYaw = calculateYawFromEncoder();
+
+    float kalmanYawValue = kalmanYaw.updateEstimate(dmpYaw, encoderYaw);
+
+    Serial.print("DMP Yaw: ");
+    Serial.print(dmpYaw);
+    Serial.print(" Encoder Yaw: ");
+    Serial.print(encoderYaw);
+    Serial.print(" Kalman Yaw: ");
+    Serial.println(kalmanYawValue);
+
+    delay(100);
 }
 
+void encoderISR() {
+    static uint8_t state = 0;
+    state = (state << 2) | ((digitalRead(encoderPinB) << 1) | digitalRead(encoderPinA));
+    encoderTicks += (ENC_STATES[state & 0x0F]);
+}
+
+float calculateYawFromEncoder() {
+    float yaw = (encoderTicks / 360.0) * 360.0; // Assuming 360 ticks per revolution, adjust as needed
+    return yaw;
+}
+
+void dmpDataReady() {
+    mpuIntStatus = mpu.getIntStatus();
+}
+
+const int8_t ENC_STATES[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
